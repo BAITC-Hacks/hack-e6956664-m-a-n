@@ -2,6 +2,10 @@ const { CALENDAR_RANGE } = require('./catalog');
 const { cosine, evidenceLexical, lexicalScore, sentences } = require('./semantic');
 const uniqueSorted = (values) => [...new Set(values)].sort((a, b) => a.localeCompare(b, 'ru'));
 const dateOK = (v) => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) && !Number.isNaN(Date.parse(`${v}T00:00:00Z`)) && new Date(`${v}T00:00:00Z`).toISOString().slice(0, 10) === v;
+function withTimeout(promise, timeoutMs) {
+  let timer;
+  return Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => { const error = new Error('AI embedding request timed out'); error.code = 'AI_TIMEOUT'; reject(error); }, timeoutMs); })]).finally(() => clearTimeout(timer));
+}
 
 function validate(input, catalog) {
   const errors = [];
@@ -13,6 +17,7 @@ function validate(input, catalog) {
   if (input.language && !catalog.some((p) => p.languages.includes(input.language))) errors.push('Выберите язык из списка.');
   if (input.durationHours != null && input.durationHours !== '' && (!Number.isFinite(Number(input.durationHours)) || Number(input.durationHours) <= 0 || Number(input.durationHours) > 24)) errors.push('Длительность должна быть числом от 1 до 24 часов.');
   if (input.preferences != null && (typeof input.preferences !== 'string' || input.preferences.length > 500)) errors.push('Пожелания должны быть текстом длиной до 500 символов.');
+  if (Object.hasOwn(input, 'maxHours')) errors.push('Используйте поле «durationHours» для длительности.');
   if (input.city && !catalog.some((p) => p.city === input.city)) errors.push('Выберите город из списка.');
   if (input.eventFormat && !catalog.some((p) => p.eventFormats.includes(input.eventFormat))) errors.push('Выберите формат мероприятия из списка.');
   if (input.category && !catalog.some((p) => p.categories.includes(input.category))) errors.push('Выберите категорию из каталога.');
@@ -20,12 +25,16 @@ function validate(input, catalog) {
 }
 function alternatives(catalog, req) {
   const base = catalog.filter((p) => p.city === req.city && p.categories.includes(req.category) && p.eventFormats.includes(req.eventFormat) && p.priceFromKzt <= req.budgetKzt && (!req.language || p.languages.includes(req.language)) && (req.durationHours == null || p.maxHours == null || p.maxHours >= req.durationHours));
-  const dates = [...new Set(base.filter((p) => !p.busyDates.has(req.date)).map((p) => p.id))];
-  const freeDates = new Map();
-  for (const p of base) for (const d of p.busyDates) if (d >= CALENDAR_RANGE.min && d <= CALENDAR_RANGE.max && d !== req.date) freeDates.set(d, (freeDates.get(d) || 0) + 1);
-  return [...freeDates].filter(([, count]) => count).sort((a, b) => Math.abs(Date.parse(a[0]) - Date.parse(req.date)) - Math.abs(Date.parse(b[0]) - Date.parse(req.date)) || a[0].localeCompare(b[0])).slice(0, 3).map(([date, count]) => ({ date, count }));
+  const freeDates = [];
+  for (let day = Date.parse(`${CALENDAR_RANGE.min}T00:00:00Z`); day <= Date.parse(`${CALENDAR_RANGE.max}T00:00:00Z`); day += 86400000) {
+    const date = new Date(day).toISOString().slice(0, 10);
+    if (date === req.date) continue;
+    const count = base.filter((p) => !p.busyDates.has(date)).length;
+    if (count) freeDates.push({ date, count, distance: Math.abs(day - Date.parse(`${req.date}T00:00:00Z`)) });
+  }
+  return freeDates.sort((a,b)=>a.distance-b.distance || a.date.localeCompare(b.date)).slice(0,3).map(({date,count})=>({date,count}));
 }
-function createRecommender(catalog, embeddings = null) {
+function createRecommender(catalog, embeddings = null, { aiTimeoutMs = 4800 } = {}) {
   const cities = uniqueSorted(catalog.map((p) => p.city));
   const meta = (city = cities[0]) => ({ cities, categories: uniqueSorted(catalog.flatMap((p) => p.categories)), categoriesInCity: uniqueSorted(catalog.filter((p) => p.city === city).flatMap((p) => p.categories)), eventFormats: uniqueSorted(catalog.flatMap((p) => p.eventFormats)), languages: uniqueSorted(catalog.flatMap((p) => p.languages)), calendarRange: CALENDAR_RANGE, profileCount: catalog.length });
   async function recommend(input) {
@@ -48,19 +57,32 @@ function createRecommender(catalog, embeddings = null) {
       const altDates = alternatives(catalog, req);
       return { status: 200, body: { outcome: 'no_eligible_candidates', matchedCount: 0, shownCount: 0, categoryCount: categoryPool.length, cards: [], rejectionCounts, funnel, budgetGuideKzt: budgetGuide || null, alternativeDates: altDates, message: `В городе есть ${categoryPool.length} профилей категории «${req.category}», но никто не прошёл фильтры: ${reasons.join('; ')}.` } };
     }
-    let ai = false; let vectors = new Map();
-    if (req.preferences && embeddings) { try { const all = await embeddings.embed([req.preferences, ...pool.flatMap((p) => sentences(p.description))]); vectors = new Map(all.slice(1).map((v,i) => [sentences(pool.flatMap((p)=>sentences(p.description))[i] || '')[0], v])); ai = true; } catch (e) { console.warn('Semantic ranking unavailable; using deterministic fallback:', e.message); } }
-    const scoreOf = (p) => ai ? Math.max(0, ...sentences(p.description).map((s) => cosine(embeddings.cache.get(req.preferences) || [], embeddings.cache.get(s) || []))) : lexicalScore(req.preferences, p.description);
+    let ai = false; let aiFallbackReason = '';
+    if (req.preferences && embeddings?.available) {
+      try {
+        if (!embeddings.ready && embeddings.warmupPromise) await withTimeout(embeddings.warmupPromise, aiTimeoutMs);
+        if (!embeddings.ready) throw new Error('Embedding cache is not ready');
+        await withTimeout(embeddings.embed([req.preferences]), aiTimeoutMs);
+        ai = true;
+      }
+      catch (e) { aiFallbackReason = e.code === 'AI_TIMEOUT' || e.name === 'TimeoutError' || e.name === 'AbortError' ? 'timeout' : 'provider_error'; console.warn('Semantic ranking unavailable; using deterministic fallback:', aiFallbackReason); }
+    } else if (req.preferences) aiFallbackReason = embeddings?.available ? 'cache_not_ready' : 'not_configured';
+    const scoreOf = (p) => ai ? cosine(embeddings.cache.get(req.preferences) || [], embeddings.cache.get(p.description) || []) : lexicalScore(req.preferences, p.description);
     if (req.preferences && ai) pool.sort((a,b)=>scoreOf(b)-scoreOf(a) || a.priceFromKzt-b.priceFromKzt || a.id.localeCompare(b.id,'en'));
     else pool.sort((a,b)=>a.priceFromKzt-b.priceFromKzt || a.id.localeCompare(b.id,'en'));
     const cards = pool.slice(0,3).map((p) => {
-      const evidences = req.preferences ? (ai ? sentences(p.description).map((s)=>({text:s,score:cosine(embeddings.cache.get(req.preferences)||[],embeddings.cache.get(s)||[])})).sort((a,b)=>b.score-a.score).filter((x)=>x.score>0).slice(0,2).map((x)=>x.text) : evidenceLexical(req.preferences,p.description)) : sentences(p.description).slice(0,1);
-      const reasons = [`Совпадает с обязательными условиями: город, формат «${req.eventFormat}», свободная дата и цена от ${p.priceFromKzt.toLocaleString('ru-RU')} ₸ в пределах бюджета.`];
-      if (req.language) reasons.push(`В профиле указан язык «${req.language}».`);
-      if (req.durationHours && p.maxHours != null) reasons.push(`Заявленная длительность ${req.durationHours} ч при максимуме ${p.maxHours} ч.`);
-      return { id:p.id, name:p.name, categories:p.categories, city:p.city, priceFromKzt:p.priceFromKzt, priceImputed:p.priceImputed, cityImputed:p.cityImputed, synthetic:p.synthetic, languages:p.languages, maxHours:p.maxHours, reasons, evidence:evidences, semanticScore: req.preferences && ai ? Number(scoreOf(p).toFixed(4)) : undefined };
+      const plainSentences = sentences(p.description);
+      const evidences = req.preferences ? (ai ? plainSentences.map((s)=>({text:s,score:cosine(embeddings.cache.get(req.preferences)||[],embeddings.cache.get(s)||[])})).sort((a,b)=>b.score-a.score || a.text.localeCompare(b.text,'ru')).filter((x)=>x.score>0).slice(0,2).map((x)=>x.text) : evidenceLexical(req.preferences,p.description)) : [plainSentences.sort((a,b)=>Number(/специал|опыт|стиль|веду|провожу|предлага|услуг|работа/i.test(b))-Number(/специал|опыт|стиль|веду|провожу|предлага|услуг|работа/i.test(a)) || b.length-a.length)[0]].filter(Boolean);
+      const dateLabel = new Date(`${req.date}T00:00:00Z`).toLocaleDateString('ru-RU',{day:'numeric',month:'long',timeZone:'UTC'});
+      const eligibilityReasons = [`Город: ${p.city}`, `Категория: ${req.category}`, `Свободен ${dateLabel} по календарю`, `Проводит мероприятия в формате «${req.eventFormat}»`, `Цена от ${p.priceFromKzt.toLocaleString('ru-RU')} ₸ — в пределах бюджета`];
+      if (req.language) eligibilityReasons.push(`В профиле указан язык «${req.language}»`);
+      if (req.durationHours) eligibilityReasons.push(p.maxHours == null ? 'Максимальная длительность в профиле не указана' : `Подходит по длительности: ${req.durationHours} ч из максимальных ${p.maxHours} ч`);
+      const recommendationReason = ai ? 'Профиль входит в верхнюю часть списка по semantic similarity относительно других допустимых кандидатов.' : req.preferences ? 'AI-ранжирование недоступно; профиль показан по детерминированной сортировке цена → ID.' : 'Профиль показан в порядке цены предложения.';
+      return { id:p.id, name:p.name, categories:p.categories, city:p.city, priceFromKzt:p.priceFromKzt, priceImputed:p.priceImputed, cityImputed:p.cityImputed, synthetic:p.synthetic, languages:p.languages, maxHours:p.maxHours, eligibilityReasons, recommendationReason, reasons:[...eligibilityReasons,recommendationReason], evidence:evidences, semanticScore: req.preferences && ai ? Number(scoreOf(p).toFixed(6)) : undefined };
     });
-    return { status:200, body:{ outcome:'matched', matchedCount:pool.length, shownCount:cards.length, categoryCount:categoryPool.length, cards, rejectionCounts, funnel, ranking: req.preferences ? (ai ? 'semantic' : 'fallback') : 'price', ai: ai ? 'available' : 'fallback', message: pool.length < 3 ? `Условиям соответствуют ${pool.length} профилей; показаны все найденные.` : `Подходящих подрядчиков: ${pool.length}. Показаны первые ${cards.length}${ai ? ' по соответствию пожеланиям' : ' по цене предложения'}.`, alternativeDates: alternatives(catalog,req) } };
+    const aiNote = req.preferences && !ai ? ' AI недоступен, пожелание не использовано для ранжирования.' : '';
+    const summary = pool.length < 3 ? `Обязательным условиям соответствуют ${pool.length} профилей; показаны все найденные.` : ai ? `${pool.length} профилей прошли обязательные условия. AI ранжировал только их и выбрал ${cards.length} ближайших к вашим пожеланиям.` : `Показаны ${cards.length} подходящих подрядчиков из ${pool.length}; порядок по цене предложения.`;
+    return { status:200, body:{ outcome:'matched', matchedCount:pool.length, eligibleCount:pool.length, shownCount:cards.length, categoryCount:categoryPool.length, cards, rejectionCounts, funnel, aiStatus: ai ? 'active' : 'fallback', rankingMode: ai ? 'semantic' : 'price', aiFallbackReason: req.preferences && !ai ? aiFallbackReason : undefined, ranking: req.preferences ? (ai ? 'semantic' : 'fallback') : 'price', ai: ai ? 'available' : 'fallback', message: summary + aiNote, alternativeDates: alternatives(catalog,req) } };
   }
   return { meta, recommend };
 }
