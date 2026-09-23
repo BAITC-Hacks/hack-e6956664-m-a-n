@@ -16,8 +16,10 @@ const embeddings = new OpenAIEmbeddings();
 const engine = createRecommender(catalog, embeddings);
 const db = openDatabase();
 const social = new SocialService(db,catalog);
-const cacheWarmup = embeddings.available ? embeddings.preload(catalog).catch((error) => { console.warn('Embedding cache warmup failed; price fallback remains active:', error.message); return false; }) : Promise.resolve(false);
+let cacheState=embeddings.available?'warming':'unavailable';
+const cacheWarmup = embeddings.available ? embeddings.preload(catalog).then((ready)=>{cacheState=ready?'ready':'unavailable';return ready;}).catch((error) => { cacheState='unavailable';console.warn('Embedding cache warmup failed; price fallback remains active:', error.message); return false; }) : Promise.resolve(false);
 const PORT = Number(process.env.PORT || 3000);
+const HOST = process.env.HOST || '127.0.0.1';
 const publicDir = path.join(ROOT, 'public');
 const mime = { '.html':'text/html; charset=utf-8', '.css':'text/css; charset=utf-8', '.js':'text/javascript; charset=utf-8' };
 const sendJson = (res,status,payload) => { res.writeHead(status, {'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}); res.end(JSON.stringify(payload)); };
@@ -36,20 +38,22 @@ const server = http.createServer(async (req,res)=>{
     const user=currentUser(db,req);
     if(req.method!=='GET'&&!sameOrigin(req))return sendJson(res,403,{error:'forbidden',message:'Запрос отклонён.'});
 
-    if(req.method==='GET'&&url.pathname==='/api/health')return sendJson(res,200,{status:'ok',profiles:catalog.length,dataset:'loaded',ai:embeddings.ready?'available':'fallback',embeddingCache:embeddings.ready?'ready':embeddings.available?'warming':'unavailable',database:'sqlite',voiceAI:Boolean(process.env.AI_API_KEY||process.env.OPENAI_API_KEY)});
+    if(req.method==='GET'&&url.pathname==='/api/health')return sendJson(res,200,{status:'ok',profiles:catalog.length,dataset:'loaded',ai:embeddings.ready?'available':'fallback',embeddingCache:cacheState,database:'sqlite',voiceAI:Boolean(process.env.AI_API_KEY||process.env.OPENAI_API_KEY)});
     if(req.method==='GET'&&url.pathname==='/api/meta')return sendJson(res,200,engine.meta(url.searchParams.get('city')||undefined));
-    if(req.method==='POST'&&url.pathname==='/api/recommendations'){const input=await readBody(req);const r=await engine.recommend(input);return sendJson(res,r.status,r.body);}
+    if(req.method==='POST'&&url.pathname==='/api/recommendations'){const input=await readBody(req);const r=await engine.recommend(input);if(r.body?.cards)r.body.cards=r.body.cards.map((card)=>{const stats=social.profile(card.id,user?.id||null);return{...card,rating:stats.rating,reviewCount:stats.reviewCount,completedCount:stats.completedCount,ratingsAreDemo:stats.ratingsAreDemo,completedAreDemo:stats.completedAreDemo,canContact:stats.canContact};});return sendJson(res,r.status,r.body);}
 
     if(req.method==='POST'&&url.pathname==='/api/voice/transcribe'){
       const ip=req.socket.remoteAddress||'unknown';if(!allow(`voice:${ip}`,8,60000))return sendJson(res,429,{error:'rate_limited',message:'Слишком много запросов. Подождите минуту.'});
       const audio=await readAudio(req);const answer=await voice.transcribeAudio(audio.buffer,audio.mimeType);return sendJson(res,200,answer);
     }
     if(req.method==='POST'&&url.pathname==='/api/voice/parse'){
+      const ip=req.socket.remoteAddress||'unknown';if(!allow(`voice-parse:${ip}`,12,60000))return sendJson(res,429,{error:'rate_limited',message:'Слишком много запросов. Подождите минуту.'});
       const input=await readBody(req,12000);const answer=await voice.parseTranscript(input.transcript,catalog,input.currentValues||{});return sendJson(res,200,answer);
     }
 
     if(req.method==='GET'&&url.pathname==='/api/auth/me')return sendJson(res,200,{user:cleanUser(user)});
     if(req.method==='POST'&&url.pathname==='/api/auth/register'){
+      const ip=req.socket.remoteAddress||'unknown';if(!allow(`register:${ip}`,6,60*60*1000))return sendJson(res,429,{error:'rate_limited',message:'Слишком много регистраций. Попробуйте позже.'});
       const input=await readBody(req);const r=await social.register({username:input.username,password:input.password,role:input.role,inviteCode:input.inviteCode});
       if(r.session){setSession(res,r.session.raw,r.session.expires);return sendJson(res,r.status,{user:r.user});}return sendJson(res,r.status,{error:'registration_failed',message:r.error});
     }
@@ -98,6 +102,6 @@ const server = http.createServer(async (req,res)=>{
   } catch(error) { if(res.headersSent||res.destroyed)return;if(error.status)return sendJson(res,error.status,{error:'request_failed',message:error.message});console.error('Request failed:',error);return sendJson(res,500,{error:'internal_error',message:'Внутренняя ошибка сервера.'}); }
 });
 const cleanup=setInterval(()=>db.prepare('DELETE FROM sessions WHERE expires_at<?').run(Date.now()),60*60*1000);cleanup.unref();
-server.listen(PORT,'0.0.0.0',()=>console.log(`HackAlem AI: http://localhost:${PORT} (${catalog.length} профилей; sqlite; embeddings: ${embeddings.available?'warming':'fallback'})`));
+server.listen(PORT,HOST,()=>console.log(`HackAlem AI: http://localhost:${PORT} (${catalog.length} профилей; sqlite; embeddings: ${embeddings.available?'warming':'fallback'})`));
 function close(){clearInterval(cleanup);server.close(()=>{db.close();process.exit(0);});}
 process.on('SIGINT',close);process.on('SIGTERM',close);

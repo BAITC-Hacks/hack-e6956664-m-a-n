@@ -17,6 +17,8 @@ async function main() {
     db.close(); return;
   }
 
+  if(process.env.NODE_ENV==='production'&&process.env.ALLOW_DEMO_DATA!=='YES')throw new Error('Демо-данные не создаются в production. Для явного локального теста задайте ALLOW_DEMO_DATA=YES.');
+
   const password=process.env.DEMO_PASSWORD || 'HackAlemDemo2026!';
   if(password.length<10) throw new Error('DEMO_PASSWORD должен быть минимум 10 символов.');
   const vendorProfile=catalog.find((p)=>p.id==='HK-44733') || catalog.find((p)=>p.categories.includes('Ведущий')&&p.city==='Алматы');
@@ -38,7 +40,7 @@ async function main() {
   const customer=user('demo.customer'), friend=user('demo.friend'), outsider=user('demo.outsider'), vendor=user('demo.vendor');
   const pair=[customer,friend].sort((a,b)=>a-b);
   db.prepare('INSERT OR IGNORE INTO friendships(user_low,user_high) VALUES(?,?)').run(...pair);
-  const req=db.prepare('INSERT OR IGNORE INTO service_requests(seed_key,customer_id,contractor_user_id,contractor_id,event_summary,status) VALUES(?,?,?,?,?,?)');
+  const req=db.prepare('INSERT OR IGNORE INTO service_requests(seed_key,customer_id,contractor_user_id,contractor_id,event_summary,status,is_demo) VALUES(?,?,?,?,?,?,1)');
   req.run('demo-review-friend-v1',friend,vendor,vendorProfile.id,JSON.stringify({date:'2026-10-15',city:vendorProfile.city,eventFormat:'корпоратив',budgetKzt:1500000,preferences:'Демонстрационная заявка'}),'completed');
   req.run('demo-review-customer-v1',customer,vendor,vendorProfile.id,JSON.stringify({date:'2026-10-20',city:vendorProfile.city,eventFormat:'корпоратив',budgetKzt:1500000,preferences:'Демонстрационная заявка'}),'completed');
   const friendReq=db.prepare("SELECT id FROM service_requests WHERE seed_key='demo-review-friend-v1'").get().id;
@@ -48,8 +50,8 @@ async function main() {
   db.prepare('INSERT OR IGNORE INTO favorites(user_id,contractor_id) VALUES(?,?)').run(customer,vendorProfile.id);
   db.prepare('INSERT OR IGNORE INTO dialogs(customer_id,contractor_user_id,contractor_id) VALUES(?,?,?)').run(customer,vendor,vendorProfile.id);
   const dialog=db.prepare('SELECT id FROM dialogs WHERE customer_id=? AND contractor_user_id=?').get(customer,vendor).id;
-  db.prepare("INSERT OR IGNORE INTO messages(dialog_id,sender_id,body,client_nonce) VALUES(?,?,?,'demo-msg-customer-v1')").run(dialog,customer,'Демонстрация: здравствуйте! Подскажите, пожалуйста, свободны ли вы на дату мероприятия?');
-  db.prepare("INSERT OR IGNORE INTO messages(dialog_id,sender_id,body,client_nonce) VALUES(?,?,?,'demo-msg-vendor-v1')").run(dialog,vendor,'Демонстрация: здравствуйте! Готов обсудить программу и детали.');
+  db.prepare("INSERT OR IGNORE INTO messages(dialog_id,sender_id,body,client_nonce,is_demo) VALUES(?,?,?,'demo-msg-customer-v1',1)").run(dialog,customer,'Демонстрация: здравствуйте! Подскажите, пожалуйста, свободны ли вы на дату мероприятия?');
+  db.prepare("INSERT OR IGNORE INTO messages(dialog_id,sender_id,body,client_nonce,is_demo) VALUES(?,?,?,'demo-msg-vendor-v1',1)").run(dialog,vendor,'Демонстрация: здравствуйте! Готов обсудить программу и детали.');
   // Explicitly mark demo accounts and rows so these examples are never mistaken for verified marketplace history.
   console.log(`Демо-данные готовы (идемпотентно). Аккаунты: demo.customer, demo.friend, demo.outsider, demo.vendor; профиль подрядчика: ${vendorProfile.id}. Пароль: ${password}`);
   db.close();

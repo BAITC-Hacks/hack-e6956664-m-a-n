@@ -24,11 +24,12 @@ function lexicalScore(query, description) {
 }
 
 class OpenAIEmbeddings {
-  constructor({ apiKey = process.env.AI_API_KEY || process.env.OPENAI_API_KEY, provider = process.env.AI_PROVIDER || 'openai', model = process.env.AI_MODEL || process.env.EMBEDDING_MODEL || 'text-embedding-3-small', timeoutMs = Number(process.env.AI_TIMEOUT_MS || 4500), fetchImpl = fetch } = {}) {
+  constructor({ apiKey = process.env.AI_API_KEY || process.env.OPENAI_API_KEY, provider = process.env.AI_PROVIDER || 'openai', model = process.env.AI_MODEL || process.env.EMBEDDING_MODEL || 'text-embedding-3-small', timeoutMs = Number(process.env.AI_TIMEOUT_MS || 4500), cacheTimeoutMs = Number(process.env.AI_CACHE_TIMEOUT_MS || 60000), fetchImpl = fetch } = {}) {
     this.apiKey = apiKey;
     this.provider = provider.toLowerCase();
     this.model = model;
     this.timeoutMs = Math.min(Math.max(timeoutMs, 250), 10000);
+    this.cacheTimeoutMs = Math.min(Math.max(cacheTimeoutMs, this.timeoutMs), 120000);
     this.fetch = fetchImpl;
     this.cache = new Map();
     this.ready = false;
@@ -37,7 +38,7 @@ class OpenAIEmbeddings {
   }
   get available() { return this.provider === 'openai' && Boolean(this.apiKey); }
 
-  async embed(texts) {
+  async embed(texts, { timeoutMs = this.timeoutMs } = {}) {
     if (!this.available) throw new Error('Embedding provider is not configured');
     const uniqueMissing = [...new Set(texts)].filter((text) => !this.cache.has(text));
     for (let i = 0; i < uniqueMissing.length; i += 512) {
@@ -46,7 +47,7 @@ class OpenAIEmbeddings {
         method: 'POST',
         headers: { Authorization: `Bearer ${this.apiKey}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ model: this.model, input: batch }),
-        signal: AbortSignal.timeout(this.timeoutMs),
+        signal: AbortSignal.timeout(timeoutMs),
       });
       if (!response.ok) throw new Error(`Embedding provider returned HTTP ${response.status}`);
       const json = await response.json();
@@ -66,7 +67,7 @@ class OpenAIEmbeddings {
     if (this.warmupPromise) return this.warmupPromise;
     if (!this.available) return Promise.resolve(false);
     const texts = profiles.flatMap((profile) => [profile.description, ...sentences(profile.description)]).filter(Boolean);
-    this.warmupPromise = this.embed(texts).then(() => {
+    this.warmupPromise = this.embed(texts,{timeoutMs:this.cacheTimeoutMs}).then(() => {
       this.ready = true;
       this.lastError = '';
       return true;

@@ -4,5 +4,5 @@
   "private": true,
   "description": "Explainable event contractor recommendations from a CSV catalog",
   "engines": { "node": ">=24" },
-  "scripts": { "start": "node server.js", "dev": "node --watch server.js", "test": "node --test", "seed:demo": "node scripts/seed-demo.js", "invite:contractor": "node scripts/seed-demo.js" }
+  "scripts": { "start": "node server.js", "dev": "node --watch server.js", "test": "node --test", "seed:demo": "node scripts/seed-demo.js", "invite:contractor": "node scripts/seed-demo.js", "smoke:demo": "node scripts/smoke-demo-sessions.js", "check:ai": "node scripts/check-ai-config.js" }
 }

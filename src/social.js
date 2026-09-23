@@ -51,7 +51,8 @@ class SocialService {
     else reviews.sort((a,b) => b.createdAt.localeCompare(a.createdAt) || a.id-b.id);
     const rating = rows.length ? Number((rows.reduce((sum,r) => sum+r.rating, 0)/rows.length).toFixed(1)) : null;
     const completed = this.db.prepare("SELECT count(*) AS n FROM service_requests WHERE contractor_id=? AND status='completed'").get(contractorId).n;
-    return { id:p.id,name:p.name,categories:p.categories,city:p.city,priceFromKzt:p.priceFromKzt,languages:p.languages,maxHours:p.maxHours,description:p.description,synthetic:p.synthetic,priceImputed:p.priceImputed,cityImputed:p.cityImputed,rating,reviewCount:rows.length,completedCount:completed,reviews,ratingsAreDemo:rows.some((r)=>r.isDemo),completedAreDemo:this.db.prepare("SELECT count(*) AS n FROM service_requests WHERE contractor_id=? AND status='completed' AND customer_id IN (SELECT id FROM users WHERE is_demo=1)").get(contractorId).n>0};
+    const contact=this.db.prepare("SELECT 1 FROM users WHERE role='contractor' AND contractor_id=?").get(contractorId);
+    return { id:p.id,name:p.name,categories:p.categories,city:p.city,priceFromKzt:p.priceFromKzt,languages:p.languages,maxHours:p.maxHours,description:p.description,synthetic:p.synthetic,priceImputed:p.priceImputed,cityImputed:p.cityImputed,rating,reviewCount:rows.length,completedCount:completed,reviews,canContact:Boolean(contact),ratingsAreDemo:rows.some((r)=>r.isDemo),completedAreDemo:this.db.prepare("SELECT count(*) AS n FROM service_requests WHERE contractor_id=? AND status='completed' AND is_demo=1").get(contractorId).n>0};
   }
 
   profileStats(contractorId, viewerId = null) { return this.profile(contractorId, viewerId); }
@@ -87,19 +88,20 @@ class SocialService {
     const rows = this.db.prepare(`SELECT d.id,d.contractor_id AS contractorId,d.customer_id AS customerId,d.contractor_user_id AS contractorUserId,
       (SELECT body FROM messages m WHERE m.dialog_id=d.id ORDER BY m.id DESC LIMIT 1) AS lastMessage,
       (SELECT created_at FROM messages m WHERE m.dialog_id=d.id ORDER BY m.id DESC LIMIT 1) AS lastAt,
-      (SELECT count(*) FROM messages m WHERE m.dialog_id=d.id AND m.sender_id<>? AND m.read_at IS NULL) AS unreadCount
+      (SELECT count(*) FROM messages m WHERE m.dialog_id=d.id AND m.sender_id<>? AND m.read_at IS NULL) AS unreadCount,
+      (SELECT is_demo FROM messages m WHERE m.dialog_id=d.id ORDER BY m.id DESC LIMIT 1) AS lastIsDemo
       FROM dialogs d WHERE d.customer_id=? OR d.contractor_user_id=? ORDER BY COALESCE(lastAt,d.created_at) DESC`).all(user.id,user.id,user.id);
     return rows.map((r) => {
       const otherId = user.id === r.customerId ? r.contractorUserId : r.customerId;
       const other = this.db.prepare('SELECT username,role FROM users WHERE id=?').get(otherId);
-      return { id:r.id,contractorId:r.contractorId,contractor:this.profileById.get(r.contractorId)?.name || r.contractorId,otherUsername:other?.username || 'Пользователь',otherRole:other?.role,lastMessage:r.lastMessage || 'Диалог создан',lastAt:r.lastAt || null,unreadCount:r.unreadCount };
+      return { id:r.id,contractorId:r.contractorId,customerId:r.customerId,contractor:this.profileById.get(r.contractorId)?.name || r.contractorId,otherUsername:other?.username || 'Пользователь',otherRole:other?.role,lastMessage:r.lastMessage || 'Диалог создан',lastAt:r.lastAt || null,lastIsDemo:Boolean(r.lastIsDemo),unreadCount:r.unreadCount };
     });
   }
   messages(user, dialogId, markRead = false) {
     const dialog = this.dialogAccess(user,dialogId);
     if (!dialog) return null;
     if (markRead) this.db.prepare('UPDATE messages SET read_at=CURRENT_TIMESTAMP WHERE dialog_id=? AND sender_id<>? AND read_at IS NULL').run(dialogId,user.id);
-    return this.db.prepare('SELECT id,sender_id AS senderId,body,created_at AS createdAt,read_at AS readAt FROM messages WHERE dialog_id=? ORDER BY id LIMIT 500').all(dialogId).map((r)=>({...r,isMine:r.senderId===user.id}));
+    return this.db.prepare('SELECT id,sender_id AS senderId,body,created_at AS createdAt,read_at AS readAt,is_demo AS isDemo FROM messages WHERE dialog_id=? ORDER BY id LIMIT 500').all(dialogId).map((r)=>({...r,isDemo:Boolean(r.isDemo),isMine:r.senderId===user.id}));
   }
   sendMessage(user,dialogId,{body,nonce}) {
     if (!this.dialogAccess(user,dialogId)) return {status:404,error:'Диалог не найден.'};
@@ -107,7 +109,7 @@ class SocialService {
     if (typeof nonce!=='string' || !/^[\w-]{12,80}$/.test(nonce)) return {status:400,error:'Не удалось проверить повторную отправку. Обновите страницу.'};
     const existing=this.db.prepare('SELECT id FROM messages WHERE dialog_id=? AND sender_id=? AND client_nonce=?').get(dialogId,user.id,nonce);
     if(existing) return {status:200,id:existing.id,duplicate:true};
-    const created=this.db.prepare('INSERT INTO messages(dialog_id,sender_id,body,client_nonce) VALUES(?,?,?,?)').run(dialogId,user.id,body.trim(),nonce);
+    const created=this.db.prepare('INSERT INTO messages(dialog_id,sender_id,body,client_nonce,is_demo) VALUES(?,?,?,?,?)').run(dialogId,user.id,body.trim(),nonce,user.isDemo?1:0);
     return {status:201,id:Number(created.lastInsertRowid),duplicate:false};
   }
 
@@ -155,11 +157,11 @@ class SocialService {
     if(typeof eventSummary!=='object'||!eventSummary||Array.isArray(eventSummary)) return {status:400,error:'Добавьте сводку мероприятия.'};
     const safe={date:String(eventSummary.date||'').slice(0,10),city:String(eventSummary.city||'').slice(0,80),eventFormat:String(eventSummary.eventFormat||'').slice(0,80),budgetKzt:Number.isInteger(eventSummary.budgetKzt)?eventSummary.budgetKzt:null,preferences:String(eventSummary.preferences||'').slice(0,500)};
     if(!safe.city||!safe.eventFormat||!safe.date) return {status:400,error:'В сводке нужны город, дата и формат.'};
-    const result=this.db.prepare("INSERT INTO service_requests(customer_id,contractor_user_id,contractor_id,event_summary,status) VALUES(?,?,?,?,'requested')").run(user.id,vendor.id,contractorId,JSON.stringify(safe));
+    const result=this.db.prepare("INSERT INTO service_requests(customer_id,contractor_user_id,contractor_id,event_summary,status,is_demo) VALUES(?,?,?,?,'requested',?)").run(user.id,vendor.id,contractorId,JSON.stringify(safe),user.isDemo?1:0);
     return {status:201,id:Number(result.lastInsertRowid)};
   }
   requests(user) {
-    return this.db.prepare('SELECT id,customer_id AS customerId,contractor_user_id AS contractorUserId,contractor_id AS contractorId,event_summary AS eventSummary,status,created_at AS createdAt,updated_at AS updatedAt FROM service_requests WHERE customer_id=? OR contractor_user_id=? ORDER BY id DESC').all(user.id,user.id).map((r)=>({...r,eventSummary:JSON.parse(r.eventSummary),canReview:user.id===r.customerId&&r.status==='completed'}));
+    return this.db.prepare('SELECT id,customer_id AS customerId,contractor_user_id AS contractorUserId,contractor_id AS contractorId,event_summary AS eventSummary,status,created_at AS createdAt,updated_at AS updatedAt,is_demo AS isDemo FROM service_requests WHERE customer_id=? OR contractor_user_id=? ORDER BY id DESC').all(user.id,user.id).map((r)=>({...r,isDemo:Boolean(r.isDemo),eventSummary:JSON.parse(r.eventSummary),canReview:user.id===r.customerId&&r.status==='completed'}));
   }
   transitionRequest(user,id,next) {
     const r=this.db.prepare('SELECT * FROM service_requests WHERE id=?').get(id);
@@ -177,8 +179,8 @@ class SocialService {
     if(typeof body!=='string'||!body.trim()||body.trim().length>2000) return {status:400,error:'Текст отзыва должен содержать от 1 до 2000 символов.'};
     const existing=this.db.prepare('SELECT id,author_id AS authorId FROM reviews WHERE service_request_id=?').get(id);
     if(existing&&existing.authorId!==user.id) return {status:403,error:'Нельзя редактировать чужой отзыв.'};
-    this.db.prepare(`INSERT INTO reviews(service_request_id,author_id,contractor_id,rating,body) VALUES(?,?,?,?,?)
-      ON CONFLICT(service_request_id) DO UPDATE SET rating=excluded.rating,body=excluded.body,updated_at=CURRENT_TIMESTAMP WHERE reviews.author_id=excluded.author_id`).run(id,user.id,request.contractorId,rating,body.trim());
+    this.db.prepare(`INSERT INTO reviews(service_request_id,author_id,contractor_id,rating,body,is_demo) VALUES(?,?,?,?,?,?)
+      ON CONFLICT(service_request_id) DO UPDATE SET rating=excluded.rating,body=excluded.body,updated_at=CURRENT_TIMESTAMP WHERE reviews.author_id=excluded.author_id`).run(id,user.id,request.contractorId,rating,body.trim(),user.isDemo?1:0);
     return {status:200};
   }
 }

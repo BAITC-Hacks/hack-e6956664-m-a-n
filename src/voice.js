@@ -18,7 +18,8 @@ function safeInteger(value, min, max) { return Number.isInteger(value)&&value>=m
 function validateDraft(raw, catalog, now = new Date()) {
   const allowed=options(catalog), today=dateInZone(now);
   const city=canonical(raw?.city,allowed.cities,{'алматы':'Алматы'});
-  const category=canonical(raw?.category,allowed.categories,{'ведущий':'Ведущий','тамада':'Ведущий'});
+  const categoriesForCity=city?catalog.filter((p)=>p.city===city).flatMap((p)=>p.categories):allowed.categories;
+  const category=canonical(raw?.category,[...new Set(categoriesForCity)],{'ведущий':'Ведущий','тамада':'Ведущий'});
   const eventFormat=canonical(raw?.eventFormat,allowed.formats,{'корпоратив':'корпоратив'});
   let date=typeof raw?.date==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(raw.date)&&!Number.isNaN(Date.parse(`${raw.date}T00:00:00Z`))&&new Date(`${raw.date}T00:00:00Z`).toISOString().slice(0,10)===raw.date?raw.date:null;
   const budgetKzt=safeInteger(raw?.budgetKzt,1,100000000);
@@ -27,6 +28,7 @@ function validateDraft(raw, catalog, now = new Date()) {
   const preferences=typeof raw?.preferences==='string'?raw.preferences.trim().slice(0,500):'';
   const clarifications=Array.isArray(raw?.clarifications)?raw.clarifications.filter((x)=>typeof x==='string').slice(0,8).map((x)=>x.slice(0,180)):[];
   const add=(field,text)=>{ if(!clarifications.some((x)=>x.startsWith(field+':'))) clarifications.push(`${field}: ${text}`); };
+  for(const [field,value] of [['Город',city],['Категория',category],['Формат',eventFormat],['Дата',date],['Бюджет',budgetKzt]]) if(!value) add(field,'параметр не удалось определить однозначно — уточните его вручную.');
   for(const [field,value,source] of [['Город',city,raw?.city],['Категория',category,raw?.category],['Формат',eventFormat,raw?.eventFormat],['Язык',language,raw?.language]]) if(source && !value) add(field,`«${String(source).slice(0,60)}» отсутствует в каталоге — выберите значение вручную.`);
   if(raw?.date && !date) add('Дата','не удалось однозначно определить дату; уточните её вручную.');
   if(date && (date<CALENDAR_RANGE.min||date>CALENDAR_RANGE.max)) { add('Дата',`должна быть в пределах ${CALENDAR_RANGE.min}–${CALENDAR_RANGE.max}.`); date=null; }
