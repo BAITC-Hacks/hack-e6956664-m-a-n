@@ -1,67 +1,9 @@
 <!doctype html>
-<html lang="ru">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#f3f5f8">
-  <title>Подбор подрядчиков — HackAlem AI</title>
-  <link rel="stylesheet" href="/styles.css">
-  <script src="/app.js" defer></script>
-</head>
-<body>
-  <header class="topbar">
-    <a class="brand" href="/" aria-label="HackAlem AI — главная"><span class="brand-mark">H</span><span>HackAlem <b>AI</b></span></a>
-    <span class="catalog-count" id="catalog-count">Загружаем каталог…</span>
-  </header>
-
-  <main class="page-shell">
-    <section class="intro">
-      <p class="eyebrow">ПОДБОР ПОДРЯДЧИКОВ ДЛЯ МЕРОПРИЯТИЯ</p>
-      <h1>Найдите подходящих.<br><span>Поймите почему.</span></h1>
-      <p class="intro-copy">Укажите параметры события — покажем до трёх подрядчиков, объясним совпадения и проверим календарь на выбранную дату.</p>
-    </section>
-
-    <section class="workspace" aria-label="Подбор подрядчика">
-      <form id="search-form" class="search-panel">
-        <div class="panel-heading">
-          <div><span class="step">01</span><h2>Параметры события</h2></div>
-          <span class="required-note">* обязательные поля</span>
-        </div>
-        <div class="form-grid">
-          <label class="field"><span>Город <i>*</i></span><select name="city" id="city" required></select></label>
-          <label class="field"><span>Дата мероприятия <i>*</i></span><input name="date" id="date" type="date" required></label>
-          <label class="field"><span>Тип мероприятия <i>*</i></span><select name="eventFormat" id="event-format" required></select></label>
-          <label class="field"><span>Категория <i>*</i></span><select name="category" id="category" required></select></label>
-          <label class="field"><span>Бюджет, ₸ <i>*</i></span><div class="input-suffix"><input name="budgetKzt" id="budget" type="number" min="0" step="10000" value="2000000" required><span>₸</span></div></label>
-          <label class="field"><span>Язык <small>необязательно</small></span><select name="language" id="language"><option value="">Любой язык</option></select></label>
-          <label class="field"><span>Длительность <small>необязательно</small></span><div class="input-suffix"><input name="maxHours" id="max-hours" type="number" min="1" max="24" placeholder="Например, 5"><span>ч</span></div></label>
-        </div>
-        <div class="form-footer">
-          <p>Занятость проверяется по календарю подрядчика.<br>Рекомендация не является подтверждением бронирования.</p>
-          <button class="primary-button" id="submit-button" type="submit"><span>Подобрать подрядчиков</span><span aria-hidden="true">→</span></button>
-        </div>
-      </form>
-
-      <aside class="demo-panel" aria-label="Демо-запросы">
-        <span class="step">БЫСТРЫЙ СТАРТ</span>
-        <h2>Попробуйте демо</h2>
-        <p>Готовые запросы из датасета, чтобы сразу увидеть подбор.</p>
-        <button class="demo-button" data-demo="dense"><span class="demo-icon">01</span><span><b>Популярная категория</b><small>Ведущий · Алматы · осень</small></span><span class="demo-arrow">↗</span></button>
-        <button class="demo-button" data-demo="busy-date"><span class="demo-icon">02</span><span><b>Та же заявка, другая дата</b><small>Занятость меняет подбор</small></span><span class="demo-arrow">↗</span></button>
-        <button class="demo-button" data-demo="rare"><span class="demo-icon">03</span><span><b>Редкая категория</b><small>Инструменталист · Алматы</small></span><span class="demo-arrow">↗</span></button>
-        <button class="demo-button" data-demo="empty"><span class="demo-icon">04</span><span><b>Нет подходящих</b><small>Посмотрите понятную причину</small></span><span class="demo-arrow">↗</span></button>
-        <button class="demo-button" data-demo="unavailable"><span class="demo-icon">05</span><span><b>Категории нет в городе</b><small>Другой исход подбора</small></span><span class="demo-arrow">↗</span></button>
-        <div class="demo-footnote"><span class="pulse"></span><span>Данные каталога: 23 сент. — 31 дек. 2026</span></div>
-      </aside>
-    </section>
-
-    <section class="results-section" id="results-section" aria-live="polite" hidden>
-      <div class="results-heading"><div><p class="eyebrow">02 / ВАШ РЕЗУЛЬТАТ</p><h2 id="results-title">Подходящие подрядчики</h2></div><span class="result-count" id="result-count"></span></div>
-      <p class="result-message" id="result-message"></p>
-      <div class="cards-grid" id="cards"></div>
-    </section>
-    <div class="status-line" id="status-line" role="status"></div>
-    <footer class="footer"><span>HackAlem AI · Умный подбор подрядчиков</span><span>Рекомендации основаны на данных каталога</span></footer>
-  </main>
-</body>
-</html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="theme-color" content="#f3f5f8"><title>HackAlem AI — подбор подрядчиков</title><link rel="stylesheet" href="/styles.css"><script src="/app.js" defer></script></head>
+<body><header class="topbar"><a class="brand" href="/"><span class="brand-mark">H</span>HackAlem <b>AI</b></a><span id="catalog-count">Загружаем каталог…</span></header>
+<main class="page-shell"><section class="intro"><p class="eyebrow">ПОДБОР ПОДРЯДЧИКОВ ДЛЯ МЕРОПРИЯТИЯ</p><h1>Подходящие люди.<br><span>Понятный выбор.</span></h1><p>Задайте условия, расскажите о стиле мероприятия — получите до трёх вариантов с объяснением по данным профиля.</p></section>
+<section class="workspace"><form id="search-form" class="panel"><h2>Параметры мероприятия</h2><div class="form-grid">
+<label>Город<select id="city" required></select></label><label>Дата<input id="date" type="date" required></label><label>Формат<select id="event-format" required></select></label><label>Категория<select id="category" required></select></label><label>Бюджет, ₸<input id="budget" type="number" min="0" step="10000" value="2000000" required></label><label>Язык<select id="language"><option value="">Любой язык</option></select></label><label>Длительность, ч<input id="duration-hours" type="number" min="1" max="24" placeholder="Необязательно"></label>
+<label class="wide">Пожелания к стилю или формату <small>необязательно · до 500 символов</small><textarea id="preferences" maxlength="500" placeholder="Например: интеллигентный юмор, спокойная атмосфера, опыт с международной аудиторией"></textarea></label></div><div class="form-footer"><p>Календарь проверяется по точным датам из профиля. Подбор не является бронированием.</p><button class="primary-button" id="submit-button">Подобрать</button></div></form>
+<aside class="panel demos"><span class="eyebrow">БЫСТРЫЙ СТАРТ</span><h2>Демо-сценарии</h2><button data-demo="dense">Популярная категория · 7 октября</button><button data-demo="busy">Та же заявка · 3 октября</button><button data-demo="rare">Редкая категория · инструменталист</button><button data-demo="empty">Бюджет ниже цены</button><button data-demo="unavailable">Категории нет в городе</button><p class="footnote">66 профилей · календарь 23.09–31.12.2026</p></aside></section>
+<section id="results-section" class="results" aria-live="polite" hidden><div class="results-heading"><div><p class="eyebrow">РЕЗУЛЬТАТ ПОДБОРА</p><h2 id="results-title">Рекомендации</h2></div><span id="result-count" class="count"></span></div><p id="result-message" class="result-message"></p><div id="funnel" class="funnel"></div><div id="cards" class="cards-grid"></div><div id="comparison" class="comparison" hidden></div><div id="alternatives" class="alternatives"></div></section><div id="status-line" class="status" role="status"></div><footer>HackAlem AI · Рекомендации основаны на данных каталога</footer></main></body></html>
