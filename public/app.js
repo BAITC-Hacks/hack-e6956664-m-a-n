@@ -1,173 +1,71 @@
-const $ = (selector) => document.querySelector(selector);
-const form = $('#search-form');
-const statusLine = $('#status-line');
-let meta;
-let latestCards = [];
-const selected = new Set();
+const $ = (selector,root=document) => root.querySelector(selector);
+const $$ = (selector,root=document) => [...root.querySelectorAll(selector)];
+const form=$('#search-form'),statusLine=$('#global-status');
+let meta,user=null,latestCards=[],selected=new Set(),selectedDialog=null,dialogPoll=null,recorder=null,recorded=[],recordStarted=0,recordTimer=null,voiceDraft=null,activeProfile=null;
+const LABELS={city:'Город',category:'Категория',eventFormat:'Формат',date:'Дата',budgetKzt:'Бюджет, ₸',language:'Язык',durationHours:'Длительность, ч',preferences:'Пожелания'};
+const demos={dense:{city:'Алматы',date:'2026-10-07',eventFormat:'свадьба',category:'Ведущий',budgetKzt:2000000},busy:{city:'Алматы',date:'2026-10-03',eventFormat:'свадьба',category:'Ведущий',budgetKzt:2000000},rare:{city:'Алматы',date:'2026-10-07',eventFormat:'свадьба',category:'Инструменталист',budgetKzt:600000},empty:{city:'Алматы',date:'2026-10-07',eventFormat:'свадьба',category:'Ведущий',budgetKzt:500000},unavailable:{city:'Зарубежье',date:'2026-10-07',eventFormat:'свадьба',category:'Флорист',budgetKzt:1500000},ai:{city:'Алматы',date:'2026-10-15',eventFormat:'корпоратив',category:'Ведущий',budgetKzt:1500000,language:'русский',durationHours:6,preferences:'Интеллигентный ведущий с опытом бизнес-мероприятий, без навязчивого юмора'}};
+function node(tag,cls,text){const e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined)e.textContent=text;return e;}
+function message(text='',isError=false){statusLine.textContent=text;statusLine.classList.toggle('error',isError);}
+async function api(url,options={}){const response=await fetch(url,{credentials:'same-origin',...options,headers:{...(options.body instanceof FormData?{}:{'Content-Type':'application/json'}),...(options.headers||{})}});let data;try{data=await response.json();}catch{data={};}if(!response.ok)throw new Error(data.message||'Операция не выполнена.');return data;}
+const json=(method,body)=>({method,body:JSON.stringify(body)});
+function switchView(view){for(const panel of $$('.view')){const active=panel.id===`view-${view}`;panel.hidden=!active;panel.classList.toggle('active',active);}for(const button of $$('.nav-button'))button.classList.toggle('active',button.dataset.view===view);$('#profile-view').hidden=true;if(view==='favorites')loadFavorites();if(view==='messages')loadDialogs();if(view==='friends')loadFriends();if(view==='account')loadAccount();if(view==='messages'){clearInterval(dialogPoll);dialogPoll=setInterval(()=>{if(selectedDialog)loadMessages(selectedDialog,true).catch(()=>{});loadDialogs().catch(()=>{});},3500);}else clearInterval(dialogPoll);}
+$$('[data-view]').forEach((b)=>b.addEventListener('click',()=>switchView(b.dataset.view)));
+function requireCustomer(){if(user?.role==='customer')return true;$('#auth-notice').hidden=false;return false;}
+function setOptions(select,values,value){select.replaceChildren(...values.map((item)=>new Option(item,item)));if(value&&values.includes(value))select.value=value;}
+async function loadMeta(city=$('#city').value){meta=await api(`/api/meta?city=${encodeURIComponent(city)}`);setOptions($('#city'),meta.cities,city);setOptions($('#category'),meta.categoriesInCity,$('#category').value);setOptions($('#event-format'),meta.eventFormats,$('#event-format').value||'свадьба');setOptions($('#language'),['Любой язык',...meta.languages],$('#language').value||'Любой язык');$('#language').options[0].value='';$('#date').min=meta.calendarRange.min;$('#date').max=meta.calendarRange.max;if(!$('#date').value||$('#date').value>$('#date').max||$('#date').value<$('#date').min)$('#date').value='2026-10-07';$('#catalog-count').textContent=`${meta.profileCount} профилей в каталоге`;}
+$('#city').addEventListener('change',()=>loadMeta($('#city').value).catch((e)=>message(e.message,true)));
+function currentRequest(){return{city:$('#city').value,date:$('#date').value,eventFormat:$('#event-format').value,category:$('#category').value,budgetKzt:Number($('#budget').value),language:$('#language').value,durationHours:$('#duration-hours').value?Number($('#duration-hours').value):null,preferences:$('#preferences').value.trim()};}
+function render(data){$('#results-section').hidden=false;$('#result-message').textContent=data.message;$('#result-count').textContent=`${data.matchedCount} найдено · ${data.shownCount} показано`;const req=currentRequest();$('#selection-summary-text').textContent=data.aiStatus==='active'&&req.preferences?`${data.eligibleCount} подрядчиков прошли обязательные условия. AI ранжировал только эти профили. Календарь и бюджет проверил обычный код.`:req.preferences?`${data.eligibleCount||0} подрядчиков прошли обязательные условия. AI-ранжирование недоступно; действует цена, затем ID.`:`${data.eligibleCount??data.matchedCount} подрядчиков прошли условия. Порядок — цена, затем ID.`;
+ const funnel=$('#funnel');funnel.replaceChildren();if(data.funnel?.length){funnel.append(node('h3','','Как прошли фильтры'));const row=node('div','funnel-row');for(const item of data.funnel){const s=node('div','funnel-step');s.append(node('b','',String(item.passed)),node('span','',item.stage),node('small','',`${item.excluded} исключено`));row.append(s);}funnel.append(row);}
+ const cards=$('#cards');cards.replaceChildren();$('#comparison').replaceChildren();$('#comparison').hidden=true;$('#alternatives').replaceChildren();latestCards=data.cards||[];selected.clear();for(const c of latestCards)cards.append(renderContractorCard(c,true));if(data.budgetGuideKzt)$('#alternatives').append(node('p','',`При остальных выбранных условиях минимальная цена в каталоге: от ${data.budgetGuideKzt.toLocaleString('ru-RU')} ₸.`));if(data.alternativeDates?.length)$('#alternatives').append(node('p','',`Ближайшие даты с доступными профилями: ${data.alternativeDates.map((x)=>`${x.date} (${x.count})`).join(' · ')}`));}
+function renderContractorCard(c,includeCompare=false){const card=node('article','vendor-card');card.dataset.profileId=c.id;const top=node('div','card-top');top.append(node('div','',c.categories?.join(' · ')||''),node('small','',c.id));card.append(top,node('h3','',c.name),node('p','price',`от ${Number(c.priceFromKzt).toLocaleString('ru-RU')} ₸`));
+ const profileLink=node('button','text-button','Подробнее и отзывы');profileLink.type='button';profileLink.addEventListener('click',()=>openProfile(c.id));card.append(profileLink);const rating=node('p','rating-line','Загружаем рейтинг…');card.append(rating);api(`/api/profiles/${encodeURIComponent(c.id)}`).then((p)=>rating.textContent=p.reviewCount?`★ ${p.rating.toFixed(1)} · ${p.reviewCount} отзывов · ${p.completedCount} выполненных услуг${p.ratingsAreDemo||p.completedAreDemo?' · демо-данные':''}`:`Пока нет отзывов · ${p.completedCount?`${p.completedCount} выполненных услуг`:'Пока нет подтверждённых услуг'}${p.completedAreDemo?' · демо-данные':''}`).catch(()=>rating.textContent='Рейтинг временно недоступен.');
+ const actions=node('div','card-actions');if(user?.role==='customer'){const heart=node('button','icon-button','♡');heart.type='button';heart.title='Добавить в избранное';heart.setAttribute('aria-label',`Добавить ${c.name} в избранное`);heart.addEventListener('click',()=>toggleFavorite(c.id,heart));actions.append(heart);}const msg=node('button','secondary-button','Написать подрядчику');msg.type='button';msg.addEventListener('click',()=>openDialog(c.id));actions.append(msg);card.append(actions);
+ const badges=node('div','badges');for(const [flag,label]of[[c.synthetic,'Синтетический профиль'],[c.priceImputed,'Цена оценочная'],[c.cityImputed,'Город восстановлен']])if(flag)badges.append(node('span','badge',label));card.append(badges);const reasons=node('ul','reasons');for(const r of c.eligibilityReasons||c.reasons||[])reasons.append(node('li','',r));card.append(reasons);if(c.recommendationReason)card.append(node('p','recommendation-reason',c.recommendationReason));if(c.evidence?.length){card.append(node('h4','','Доказательства из профиля'));const quote=node('blockquote','evidence');for(const text of c.evidence)quote.append(node('p','',`«${text}»`));card.append(quote);}if(c.semanticScore!==undefined)card.append(node('small','score',`Cosine similarity: ${c.semanticScore.toFixed(4)} · диагностика`));
+ if(includeCompare){const label=node('label','compare'),cb=node('input');cb.type='checkbox';cb.addEventListener('change',()=>{cb.checked?selected.add(c.id):selected.delete(c.id);drawCompare();});label.append(cb,document.createTextNode(' Сравнить'));card.append(label);const feedback=node('p','footnote','Демо-обратная связь не является отзывом по выполненной услуге.');card.append(feedback);}return card;}
+async function toggleFavorite(id,button){if(!requireCustomer())return;button.disabled=true;try{const saved=button.textContent==='♡';await api(`/api/favorites/${encodeURIComponent(id)}`,json('PUT',{saved}));button.textContent=saved?'♥':'♡';button.title=saved?'Удалить из избранного':'Добавить в избранное';if($('#view-favorites').classList.contains('active'))loadFavorites();}catch(e){message(e.message,true);}finally{button.disabled=false;}}
+function drawCompare(){const box=$('#comparison'),items=latestCards.filter((x)=>selected.has(x.id));if(items.length<2){box.hidden=true;return;}box.hidden=false;box.replaceChildren(node('h3','','Сравнение выбранных профилей'));const t=document.createElement('table');for(const[label,key]of[['Подрядчик','name'],['Цена от','priceFromKzt'],['Языки','languages'],['Категории','categories'],['Условия','eligibilityReasons'],['Почему рекомендован','recommendationReason'],['Доказательства','evidence']]){const row=document.createElement('tr');row.append(node('th','',label));for(const c of items){const td=document.createElement('td'),v=c[key];td.textContent=Array.isArray(v)?v.join(' · '):key==='priceFromKzt'?`от ${v.toLocaleString('ru-RU')} ₸`:v||'';row.append(td);}t.append(row);}box.append(t);}
+async function submitSearch(){message();$('#submit-button').disabled=true;try{const d=await api('/api/recommendations',json('POST',currentRequest()));render(d);$('#results-section').scrollIntoView({behavior:'smooth',block:'start'});}catch(e){message(e.message,true);}finally{$('#submit-button').disabled=false;}}
+form.addEventListener('submit',(e)=>{e.preventDefault();submitSearch();});$$('[data-demo]').forEach((b)=>b.addEventListener('click',async()=>{const demo=demos[b.dataset.demo];for(const[key,v]of Object.entries(demo)){const selector={eventFormat:'#event-format',budgetKzt:'#budget',durationHours:'#duration-hours'}[key]||`#${key}`;if($(selector))$(selector).value=v;}if(!Object.hasOwn(demo,'language'))$('#language').value='';if(!Object.hasOwn(demo,'durationHours'))$('#duration-hours').value='';if(!Object.hasOwn(demo,'preferences'))$('#preferences').value='';await submitSearch();}));
 
-const demos = {
-  dense: { city:'Алматы', date:'2026-10-07', eventFormat:'свадьба', category:'Ведущий', budgetKzt:2000000 },
-  busy: { city:'Алматы', date:'2026-10-03', eventFormat:'свадьба', category:'Ведущий', budgetKzt:2000000 },
-  rare: { city:'Алматы', date:'2026-10-07', eventFormat:'свадьба', category:'Инструменталист', budgetKzt:600000 },
-  empty: { city:'Алматы', date:'2026-10-07', eventFormat:'свадьба', category:'Ведущий', budgetKzt:500000 },
-  unavailable: { city:'Зарубежье', date:'2026-10-07', eventFormat:'свадьба', category:'Флорист', budgetKzt:1500000 },
-  ai: { city:'Алматы', date:'2026-10-15', eventFormat:'корпоратив', category:'Ведущий', budgetKzt:1500000, language:'русский', durationHours:6, preferences:'Интеллигентный ведущий с опытом бизнес-мероприятий, без навязчивого юмора' },
-};
+async function refreshUser(){const data=await api('/api/auth/me');user=data.user;const nav=$('[data-view="account"]');nav.textContent=user?`Аккаунт · ${user.username}`:'Аккаунт';if(user?.isDemo)$('#account-role').textContent='Демонстрационный аккаунт — данные в профилях помечены как демо.';return user;}
+function showAuthError(text){message(text,true);switchView('account');}
+$('#login-form').addEventListener('submit',async(e)=>{e.preventDefault();const f=new FormData(e.currentTarget);try{await api('/api/auth/login',json('POST',{username:f.get('username'),password:f.get('password')}));await refreshUser();e.currentTarget.reset();message('Вход выполнен.');loadAccount();}catch(err){showAuthError(err.message);}});
+$('#register-form').addEventListener('submit',async(e)=>{e.preventDefault();const f=new FormData(e.currentTarget);try{await api('/api/auth/register',json('POST',{username:f.get('username'),password:f.get('password'),role:'customer'}));await refreshUser();e.currentTarget.reset();message('Аккаунт создан.');loadAccount();}catch(err){showAuthError(err.message);}});
+$('#logout-button').addEventListener('click',async()=>{try{await api('/api/auth/logout',json('POST',{}));user=null;await refreshUser();loadAccount();message('Вы вышли из аккаунта.');}catch(e){message(e.message,true);}});
+async function loadAccount(){if(!user){$('#auth-panel').hidden=false;$('#account-summary').hidden=true;return;}$('#auth-panel').hidden=true;$('#account-summary').hidden=false;$('#account-title').textContent=user.username;$('#account-role').textContent=`Роль: ${user.role==='customer'?'заказчик':'подрядчик'}${user.contractorId?` · профиль ${user.contractorId}`:''}${user.isDemo?' · демонстрационный аккаунт':''}`;try{const d=await api('/api/requests');renderRequests(d.items,$('#account-requests'));}catch(e){$('#account-requests').textContent=e.message;}}
+function renderRequests(items,root){root.replaceChildren();if(!items.length){root.append(node('p','empty-state','Заявок пока нет.'));return;}for(const r of items){const box=node('article','request-card'),profile=meta?.profileCount? r.contractorId:'';box.append(node('h3','',`Заявка №${r.id} · ${r.contractorId}`),node('p','',`${r.eventSummary.date} · ${r.eventSummary.city} · ${r.eventSummary.eventFormat} · ${r.status}`));const demo=user?.isDemo?node('small','demo-note','Демо-заявка'):null;if(demo)box.append(demo);if(user.role==='contractor'&&r.status==='requested'){box.append(actionButton('Принять',()=>requestStatus(r.id,'accepted')),actionButton('Отклонить',()=>requestStatus(r.id,'rejected')));}if(user.role==='contractor'&&r.status==='accepted')box.append(actionButton('Отметить услугу выполненной',()=>requestStatus(r.id,'fulfilled')));if(user.role==='customer'&&r.status==='fulfilled')box.append(actionButton('Подтвердить завершение',()=>requestStatus(r.id,'completed')));if(user.role==='customer'&&r.status==='completed')box.append(reviewForm(r));root.append(box);}}
+function actionButton(text,fn){const b=node('button','secondary-button',text);b.type='button';b.addEventListener('click',fn);return b;}
+async function requestStatus(id,status){try{await api(`/api/requests/${id}/status`,json('PATCH',{status}));await loadAccount();if(selectedDialog)await loadDialogRequests();}catch(e){message(e.message,true);}}
+function reviewForm(r){const f=node('form','review-form');const title=node('h4','','Ваш отзыв');f.append(title);const rating=document.createElement('select');rating.setAttribute('aria-label','Оценка от 1 до 5');for(let n=5;n>=1;n--)rating.add(new Option(`${n} из 5`,String(n)));const text=document.createElement('textarea');text.maxLength=2000;text.required=true;text.placeholder='Расскажите о выполненной услуге';const submit=node('button','secondary-button','Сохранить отзыв');submit.type='submit';f.append(rating,text,submit);f.addEventListener('submit',async(e)=>{e.preventDefault();submit.disabled=true;try{await api(`/api/requests/${r.id}/review`,json('PUT',{rating:Number(rating.value),body:text.value}));message('Отзыв сохранён.');await loadAccount();if(activeProfile)openProfile(activeProfile);}catch(err){message(err.message,true);}finally{submit.disabled=false;}});return f;}
 
-function setOptions(select, values, value) {
-  select.replaceChildren(...values.map((item) => new Option(item, item)));
-  if (value && values.includes(value)) select.value = value;
-}
-async function loadMeta(city = $('#city').value) {
-  const response = await fetch(`/api/meta?city=${encodeURIComponent(city)}`);
-  if (!response.ok) throw new Error('Не удалось загрузить каталог.');
-  meta = await response.json();
-  setOptions($('#city'), meta.cities, city);
-  setOptions($('#category'), meta.categoriesInCity, $('#category').value);
-  setOptions($('#event-format'), meta.eventFormats, $('#event-format').value || 'свадьба');
-  setOptions($('#language'), ['Любой язык', ...meta.languages], $('#language').value || 'Любой язык');
-  $('#language').options[0].value = '';
-  $('#date').min = meta.calendarRange.min;
-  $('#date').max = meta.calendarRange.max;
-  if (!$('#date').value || $('#date').value > $('#date').max || $('#date').value < $('#date').min) $('#date').value = '2026-10-07';
-  $('#catalog-count').textContent = `${meta.profileCount} профилей в каталоге`;
-}
-$('#city').addEventListener('change', () => loadMeta($('#city').value).catch((error) => { statusLine.textContent = error.message; }));
+async function loadFavorites(){if(!requireCustomer())return;const root=$('#favorites-list');root.textContent='Загружаем…';try{const d=await api('/api/favorites');root.replaceChildren();$('#favorites-empty').hidden=d.items.length>0;if(!d.items.length){root.hidden=true;$('#favorites-empty').hidden=false;return;}root.hidden=false;for(const p of d.items){const c=renderContractorCard(p);root.append(c);}}catch(e){root.textContent=e.message;}}
+$('#favorite-check').addEventListener('click',async()=>{if(!requireCustomer())return;const b=$('#favorite-check');b.disabled=true;try{const r=await api('/api/favorites/check',json('POST',currentRequest()));const list=$$('#favorites-list .vendor-card');for(const card of list){const id=card.dataset.profileId;let label=$('.eligibility-status',card);if(!label){label=node('p','eligibility-status');card.append(label);}label.textContent=r.statuses[id]?'Соответствует текущим обязательным условиям':'Сейчас не соответствует условиям (дата, бюджет или другие фильтры).';}$('#favorite-check-note').textContent='Проверено текущей логикой обязательных фильтров.';}catch(e){message(e.message,true);}finally{b.disabled=false;}});
 
-function currentRequest() {
-  return {
-    city: $('#city').value, date: $('#date').value, eventFormat: $('#event-format').value,
-    category: $('#category').value, budgetKzt: Number($('#budget').value), language: $('#language').value,
-    durationHours: $('#duration-hours').value ? Number($('#duration-hours').value) : null,
-    preferences: $('#preferences').value.trim(),
-  };
-}
-function node(tag, className, text) {
-  const element = document.createElement(tag);
-  if (className) element.className = className;
-  if (text !== undefined) element.textContent = text;
-  return element;
-}
-function render(data) {
-  $('#results-section').hidden = false;
-  $('#result-message').textContent = data.message;
-  $('#result-count').textContent = `${data.matchedCount} найдено · ${data.shownCount} показано`;
-  const selectionText = $('#selection-summary-text');
-  if (data.aiStatus === 'active' && currentRequest().preferences) {
-    selectionText.textContent = `${data.eligibleCount} подрядчиков прошли обязательные условия. Semantic AI сравнил пожелания только с этими профилями и выбрал ${data.shownCount} наиболее близких. Календарь и бюджет проверил обычный код.`;
-  } else if (currentRequest().preferences) {
-    selectionText.textContent = `${data.eligibleCount || 0} подрядчиков прошли обязательные условия. AI-ранжирование сейчас недоступно; порядок детерминированный — цена, затем ID.`;
-  } else {
-    selectionText.textContent = `${data.eligibleCount ?? data.matchedCount} подрядчиков прошли обязательные условия. Без пожелания варианты идут по возрастанию цены, затем ID.`;
-  }
+async function openProfile(id){activeProfile=id;for(const v of $$('.view')){v.hidden=true;v.classList.remove('active');}$('#profile-view').hidden=false;$('#profile-detail').textContent='Загружаем профиль…';$('#profile-view').scrollIntoView({behavior:'smooth'});try{const p=await api(`/api/profiles/${encodeURIComponent(id)}`);drawProfile(p,false);}catch(e){$('#profile-detail').textContent=e.message;}}
+function drawProfile(p,friendsFirst){const root=$('#profile-detail');root.replaceChildren();root.append(node('p','eyebrow',p.categories.join(' · ')),node('h1','',p.name),node('p','',`${p.city} · от ${p.priceFromKzt.toLocaleString('ru-RU')} ₸`));const stats=p.reviewCount?`★ ${p.rating.toFixed(1)} · ${p.reviewCount} отзывов · ${p.completedCount} выполненных услуг`:`Пока нет отзывов · ${p.completedCount?`${p.completedCount} выполненных услуг`:'Пока нет подтверждённых услуг'}`;root.append(node('p','rating-line large',stats));if(p.ratingsAreDemo||p.completedAreDemo)root.append(node('p','demo-note','Внимание: показатели включают явно обозначенные демонстрационные данные и не являются реальной историей площадки.'));root.append(node('p','profile-description',p.description));const actions=node('div','card-actions');if(user?.role==='customer'){const favorite=actionButton('♡ Добавить / убрать избранное',async()=>{try{const res=await api(`/api/favorites`,{}).catch(()=>({}));void res;const status=await api(`/api/favorites/${encodeURIComponent(p.id)}`,json('PUT',{saved:true}));favorite.textContent=status.saved?'♥ В избранном':'♡ Добавить / убрать избранное';}catch(e){message(e.message,true);}});favorite.addEventListener('contextmenu',(e)=>e.preventDefault());actions.append(favorite);}actions.append(actionButton('Написать подрядчику',()=>openDialog(p.id)));root.append(actions);const header=node('div','reviews-heading');header.append(node('h2','','Отзывы'));const toggle=document.createElement('label');toggle.className='toggle-label';const cb=document.createElement('input');cb.type='checkbox';cb.checked=friendsFirst;cb.addEventListener('change',()=>openProfile(p.id,cb.checked));toggle.append(cb,document.createTextNode('Сначала отзывы друзей'));header.append(toggle);root.append(header);if(!p.reviews.length)root.append(node('p','empty-state','Пока нет опубликованных отзывов. Отзыв можно оставить после подтверждения выполненной услуги.'));for(const r of p.reviews){const review=node('article',`review-card${r.isFriend?' friend-review':''}`);review.append(node('div','review-meta',`★ ${r.rating} · ${r.username} · ${new Date(`${r.createdAt.replace(' ','T')}Z`).toLocaleDateString('ru-RU')}`));if(r.isFriend)review.append(node('span','friend-badge','Отзыв вашего друга'));if(r.isDemo)review.append(node('span','demo-note','Демонстрационный отзыв'));review.append(node('p','',r.body));root.append(review);}}
+$('#profile-back').addEventListener('click',()=>{activeProfile=null;switchView('search');});
 
-  const funnel = $('#funnel');
-  funnel.replaceChildren();
-  if (data.funnel?.length) {
-    funnel.append(node('h3', '', 'Как прошли фильтры'));
-    const row = node('div', 'funnel-row');
-    for (const stage of data.funnel) {
-      const step = node('div', 'funnel-step');
-      step.append(node('b', '', String(stage.passed)), node('span', '', stage.stage), node('small', '', `${stage.excluded} исключено`));
-      row.append(step);
-    }
-    funnel.append(row);
-  }
+async function openDialog(contractorId){if(!user){requireCustomer();return;}try{const d=await api('/api/dialogs/open',json('POST',{contractorId}));selectedDialog=d.id;switchView('messages');await loadDialogs();await loadMessages(d.id);$('#conversation-title').textContent=`Переписка о профиле ${contractorId}`;prepareSummary();}catch(e){message(e.message,true);}}
+async function loadDialogs(){if(!user)return;const root=$('#dialog-list');try{const d=await api('/api/dialogs');root.replaceChildren();if(!d.items.length){root.append(node('p','empty-state','Диалогов пока нет.'));return;}for(const item of d.items){const b=node('button','dialog-item');b.type='button';b.append(node('strong','',item.contractor),node('small','',item.otherUsername),node('span','',item.lastMessage),node('small','',item.lastAt?new Date(`${item.lastAt.replace(' ','T')}Z`).toLocaleString('ru-RU'):'Новый диалог'));if(item.unreadCount)b.append(node('b','unread-count',String(item.unreadCount)));b.addEventListener('click',async()=>{selectedDialog=item.id;$('#conversation-empty').hidden=true;$('#conversation-content').hidden=false;$('#conversation-title').textContent=`${item.contractor} · ${item.otherUsername}`;await loadMessages(item.id);await loadDialogRequests();prepareSummary();});root.append(b);}}catch(e){root.textContent=e.message;}}
+async function loadMessages(id,silent=false){if(!user)return;try{const d=await api(`/api/dialogs/${id}/messages`);if(selectedDialog!==id)return;$('#conversation-empty').hidden=true;$('#conversation-content').hidden=false;const root=$('#message-history'),wasBottom=root.scrollHeight-root.scrollTop-root.clientHeight<70;root.replaceChildren();for(const m of d.items){const bubble=node('article',`message-bubble${m.isMine?' mine':''}`);bubble.append(node('p','',m.body),node('small','',new Date(`${m.createdAt.replace(' ','T')}Z`).toLocaleString('ru-RU')));root.append(bubble);}if(wasBottom||!silent)root.scrollTop=root.scrollHeight;await loadDialogRequests();}catch(e){if(!silent)message(e.message,true);}}
+$('#message-form').addEventListener('submit',async(e)=>{e.preventDefault();if(!selectedDialog)return;const input=$('#message-input'),button=$('button',e.currentTarget),body=input.value.trim();if(!body)return;button.disabled=true;try{await api(`/api/dialogs/${selectedDialog}/messages`,json('POST',{body,nonce:crypto.randomUUID()}));input.value='';await loadMessages(selectedDialog);await loadDialogs();}catch(err){message(err.message,true);}finally{button.disabled=false;}});
+let requestSummary={};function prepareSummary(){requestSummary=currentRequest();const root=$('#request-summary-preview');root.replaceChildren();for(const[k,label]of Object.entries({date:'Дата',city:'Город',eventFormat:'Формат',budgetKzt:'Бюджет',preferences:'Пожелание'})){const row=node('label','summary-row');row.append(node('span','',label));let input;if(k==='preferences'){input=document.createElement('textarea');input.maxLength=500;}else{input=document.createElement('input');if(k==='date')input.type='date';if(k==='budgetKzt'){input.type='number';input.min='0';}}input.value=requestSummary[k]??'';input.dataset.summaryField=k;row.append(input);root.append(row);}}
+$('#create-request').addEventListener('click',async()=>{if(!requireCustomer()||!selectedDialog)return;const summary={};$$('[data-summary-field]').forEach((input)=>{const k=input.dataset.summaryField;summary[k]=k==='budgetKzt'?(input.value?Number(input.value):null):input.value.trim();});const button=$('#create-request');button.disabled=true;try{await api(`/api/dialogs/${selectedDialog}/requests`,json('POST',{eventSummary:summary}));message('Заявка отправлена подрядчику.');await loadDialogRequests();await loadAccount();}catch(e){message(e.message,true);}finally{button.disabled=false;}});
+async function loadDialogRequests(){if(!selectedDialog||!user)return;const d=await api('/api/requests'),dialog=await api('/api/dialogs');const item=dialog.items.find((x)=>x.id===selectedDialog);if(!item)return;const profiles=await api('/api/profiles/'+encodeURIComponent(item.contractorId));const ids=new Set((await api('/api/requests')).items.filter((r)=>r.contractorId===item.contractorId).map((r)=>r.id));const selected=(await api('/api/requests')).items.filter((r)=>ids.has(r.id)&&(r.customerId===user.id||user.role==='contractor'));const root=$('#dialog-requests');root.replaceChildren();if(!selected.length){root.append(node('p','footnote','Заявок в этом диалоге пока нет.'));return;}for(const r of selected){const card=node('article','request-card');card.append(node('strong','',`Заявка №${r.id} · ${r.status}`),node('p','',`${r.eventSummary.date} · ${r.eventSummary.city} · ${r.eventSummary.eventFormat}`));root.append(card);}void d;void profiles;}
 
-  const cards = $('#cards');
-  cards.replaceChildren();
-  $('#comparison').replaceChildren();
-  $('#comparison').hidden = true;
-  $('#alternatives').replaceChildren();
-  latestCards = data.cards || [];
-  selected.clear();
-  for (const contractor of latestCards) {
-    const card = node('article', 'vendor-card');
-    const top = node('div', 'card-top');
-    top.append(node('div', '', contractor.categories.join(' · ')), node('small', '', contractor.id));
-    card.append(top, node('h3', '', contractor.name), node('p', 'price', `от ${contractor.priceFromKzt.toLocaleString('ru-RU')} ₸`));
-    const badges = node('div', 'badges');
-    for (const [flag, label] of [[contractor.synthetic, 'Синтетический профиль'], [contractor.priceImputed, 'Цена оценочная'], [contractor.cityImputed, 'Город восстановлен']]) if (flag) badges.append(node('span', 'badge', label));
-    card.append(badges);
+async function loadFriends(){if(!user){requireCustomer();return;}try{const d=await api('/api/friends'),req=$('#friend-requests'),list=$('#friends-list');req.replaceChildren();list.replaceChildren();if(!d.incoming.length&&!d.outgoing.length)req.append(node('p','empty-state','Нет запросов в друзья.'));for(const r of d.incoming){const item=node('div','friend-row',`${r.username} хочет добавить вас в друзья`);item.append(actionButton('Принять',async()=>{await api(`/api/friends/requests/${r.id}`,json('PATCH',{accept:true}));loadFriends();}),actionButton('Отклонить',async()=>{await api(`/api/friends/requests/${r.id}`,json('PATCH',{accept:false}));loadFriends();}));req.append(item);}for(const r of d.outgoing)req.append(node('p','footnote',`Ожидается ответ от ${r.username}.`));if(!d.friends.length)list.append(node('p','empty-state','Пока нет друзей.'));for(const f of d.friends){const row=node('div','friend-row');row.append(node('strong','',`${f.username}${f.isDemo?' · демо':''}`));const remove=actionButton('Удалить',async()=>{await api(`/api/friends/${f.id}`,{method:'DELETE'});await loadFriends();if(activeProfile)openProfile(activeProfile);});row.append(remove);list.append(row);}}catch(e){message(e.message,true);}}
+$('#friend-search').addEventListener('submit',async(e)=>{e.preventDefault();if(!user){requireCustomer();return;}const input=$('#friend-username');try{await api('/api/friends/requests',json('POST',{username:input.value.trim()}));input.value='';message('Запрос отправлен.');await loadFriends();}catch(err){message(err.message,true);}});
 
-    const eligibility = node('ul', 'reasons');
-    for (const reason of contractor.eligibilityReasons || contractor.reasons || []) eligibility.append(node('li', '', reason));
-    card.append(eligibility);
-    if (contractor.recommendationReason) card.append(node('p', 'recommendation-reason', contractor.recommendationReason));
-    if (contractor.evidence?.length) {
-      card.append(node('h4', '', currentRequest().preferences ? 'Доказательства из профиля' : 'Из описания профиля'));
-      const quote = node('blockquote', 'evidence');
-      for (const text of contractor.evidence) quote.append(node('p', '', `«${text}»`));
-      card.append(quote);
-    }
-    if (contractor.semanticScore !== undefined) card.append(node('small', 'score', `Cosine similarity: ${contractor.semanticScore.toFixed(4)} · только для диагностики`));
+async function transcribe(blob,duration){const state=$('#voice-state');state.textContent='Распознаём речь…';$('#voice-start').disabled=true;try{const data=new FormData();data.append('audio',blob,'request.webm');const transcript=await api('/api/voice/transcribe',{method:'POST',headers:{'X-Audio-Duration':String(duration)},body:data});$('#voice-transcript').value=transcript.transcript;state.textContent='Речь распознана. Извлекаем параметры…';await parseVoiceTranscript(transcript.transcript);}catch(e){state.textContent=e.message;message(e.message,true);}finally{$('#voice-start').disabled=false;}}
+function stopTracks(){if(recorder?.stream)recorder.stream.getTracks().forEach((t)=>t.stop());}
+$('#voice-start').addEventListener('click',async()=>{message();$('#voice-state').textContent='';if(!navigator.mediaDevices?.getUserMedia||typeof MediaRecorder==='undefined'){ $('#voice-state').textContent='Этот браузер не поддерживает запись. Используйте актуальный Chrome, Edge или Safari.';return;}try{const stream=await navigator.mediaDevices.getUserMedia({audio:true});recorded=[];const mime=['audio/webm;codecs=opus','audio/webm','audio/mp4'].find((x)=>MediaRecorder.isTypeSupported(x));recorder=mime?new MediaRecorder(stream,{mimeType:mime}):new MediaRecorder(stream);recorder.stream=stream;recorder.ondataavailable=(e)=>{if(e.data.size)recorded.push(e.data);};recorder.onstop=()=>{stopTracks();clearTimeout(recordTimer);if(!recorded.length){$('#voice-state').textContent='Запись пустая. Попробуйте ещё раз.';$('#voice-start').disabled=false;return;}const blob=new Blob(recorded,{type:recorder.mimeType||'audio/webm'});transcribe(blob,Math.min(30,Math.ceil((Date.now()-recordStarted)/1000)));};recordStarted=Date.now();recorder.start(300);$('#voice-start').hidden=true;$('#voice-stop').hidden=false;$('#voice-cancel').hidden=false;$('#voice-state').textContent='Идёт запись… максимум 30 секунд. Нажмите «Остановить запись», когда закончите.';recordTimer=setTimeout(()=>{if(recorder?.state==='recording')recorder.stop();$('#voice-stop').hidden=true;$('#voice-cancel').hidden=true;},30000);}catch(e){$('#voice-state').textContent=e.name==='NotAllowedError'?'Нет доступа к микрофону. Разрешите доступ в настройках браузера и попробуйте снова.':'Не удалось начать запись. Проверьте микрофон и права браузера.';}});
+$('#voice-stop').addEventListener('click',()=>{if(recorder?.state==='recording')recorder.stop();$('#voice-stop').hidden=true;$('#voice-cancel').hidden=true;$('#voice-state').textContent='Запись остановлена.';});
+$('#voice-cancel').addEventListener('click',()=>{clearTimeout(recordTimer);if(recorder?.state==='recording'){recorder.onstop=null;recorder.stop();}stopTracks();$('#voice-start').hidden=false;$('#voice-start').disabled=false;$('#voice-stop').hidden=true;$('#voice-cancel').hidden=true;$('#voice-state').textContent='Запись отменена; аудио не отправлено.';recorded=[];});
+async function parseVoiceTranscript(transcript){$('#voice-draft').hidden=false;$('#voice-changes').textContent='AI предлагает изменения…';try{const result=await api('/api/voice/parse',json('POST',{transcript,currentValues:currentRequest()}));voiceDraft=result;renderVoiceDraft(result);$('#voice-state').textContent='Проверьте предложения, затем отметьте и примените нужные поля.';}catch(e){$('#voice-changes').textContent=e.message;$('#voice-state').textContent=e.message;}}
+function renderVoiceDraft(result){const cl=$('#voice-clarifications');cl.textContent=result.clarifications?.length?`Нужно уточнить: ${result.clarifications.join(' · ')}`:'Все распознанные поля можно проверить ниже.';const root=$('#voice-changes');root.replaceChildren();for(const[field,value]of Object.entries(result.suggestions||{})){if(value==null||value==='')continue;const row=node('label','change-row'),cb=document.createElement('input');cb.type='checkbox';cb.checked=!(result.overwriteFields||[]).includes(field);cb.dataset.voiceField=field;const val=field==='budgetKzt'?`${Number(value).toLocaleString('ru-RU')} ₸`:field==='date'?`${value} (${new Date(`${value}T12:00:00`).toLocaleDateString('ru-RU')})`:String(value);row.append(cb,node('span','',`${LABELS[field]}: ${val}${(result.overwriteFields||[]).includes(field)?' · заменит текущее значение':''}`));root.append(row);}if(!root.children.length)root.append(node('p','empty-state','Ни одного поля не извлечено. Заполните заявку вручную.'));}
+$('#voice-transcript').addEventListener('input',()=>{});$('#voice-apply').addEventListener('click',()=>{if(!voiceDraft)return;const map={city:'#city',category:'#category',eventFormat:'#event-format',date:'#date',budgetKzt:'#budget',language:'#language',durationHours:'#duration-hours',preferences:'#preferences'};for(const cb of $$('[data-voice-field]'))if(cb.checked){const field=cb.dataset.voiceField,el=$(map[field]),value=voiceDraft.suggestions[field];if(!el)continue;if(el.tagName==='SELECT'&&value&&! [...el.options].some((o)=>o.value===String(value))){message(`${LABELS[field]} отсутствует в текущем списке; выберите вручную.`,true);continue;}el.value=value??'';}$('#voice-draft').hidden=true;$('#voice-start').hidden=false;message('Выбранные значения применены. Проверьте форму и отдельно нажмите «Подобрать».');});$('#voice-dismiss').addEventListener('click',()=>{$('#voice-draft').hidden=true;$('#voice-start').hidden=false;});
 
-    const compare = node('label', 'compare');
-    const checkbox = node('input');
-    checkbox.type = 'checkbox';
-    checkbox.addEventListener('change', () => { checkbox.checked ? selected.add(contractor.id) : selected.delete(contractor.id); drawCompare(); });
-    compare.append(checkbox, document.createTextNode(' Сравнить'));
-    card.append(compare);
-    const feedback = node('div', 'feedback');
-    for (const label of ['👍 Подходит', '👎 Не подходит']) {
-      const button = node('button', 'small-button', label);
-      button.type = 'button';
-      button.addEventListener('click', () => { button.textContent = 'Спасибо за отзыв'; });
-      feedback.append(button);
-    }
-    card.append(feedback);
-    cards.append(card);
-  }
-  if (data.budgetGuideKzt) $('#alternatives').append(node('p', '', `При остальных выбранных условиях минимальная цена в каталоге: от ${data.budgetGuideKzt.toLocaleString('ru-RU')} ₸.`));
-  if (data.alternativeDates?.length) {
-    const text = data.alternativeDates.map((item) => `${item.date} (${item.count})`).join(' · ');
-    $('#alternatives').append(node('p', '', `Ближайшие даты с доступными профилями: ${text}`));
-  }
-}
-function drawCompare() {
-  const box = $('#comparison');
-  const items = latestCards.filter((contractor) => selected.has(contractor.id));
-  if (items.length < 2) { box.hidden = true; return; }
-  box.hidden = false;
-  box.replaceChildren(node('h3', '', 'Сравнение выбранных профилей'));
-  const table = document.createElement('table');
-  for (const [label, key] of [['Подрядчик', 'name'], ['Цена от', 'priceFromKzt'], ['Языки', 'languages'], ['Категории', 'categories'], ['Условия', 'eligibilityReasons'], ['Почему рекомендован', 'recommendationReason'], ['Доказательства из профиля', 'evidence']]) {
-    const row = document.createElement('tr');
-    row.append(node('th', '', label));
-    for (const contractor of items) {
-      const cell = document.createElement('td');
-      const value = contractor[key];
-      cell.textContent = Array.isArray(value) ? value.join(' · ') : key === 'priceFromKzt' ? `от ${value.toLocaleString('ru-RU')} ₸` : value || '';
-      row.append(cell);
-    }
-    table.append(row);
-  }
-  box.append(table);
-}
-async function submitSearch() {
-  statusLine.textContent = '';
-  $('#submit-button').disabled = true;
-  try {
-    const response = await fetch('/api/recommendations', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(currentRequest()) });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.message || 'Не удалось выполнить подбор.');
-    render(data);
-    $('#results-section').scrollIntoView({ behavior:'smooth', block:'start' });
-  } catch (error) { statusLine.textContent = error.message; }
-  finally { $('#submit-button').disabled = false; }
-}
-
-form.addEventListener('submit', (event) => { event.preventDefault(); submitSearch(); });
-document.querySelectorAll('[data-demo]').forEach((button) => button.addEventListener('click', async () => {
-  const demo = demos[button.dataset.demo];
-  for (const [key, value] of Object.entries(demo)) {
-    const selector = { eventFormat:'#event-format', budgetKzt:'#budget', durationHours:'#duration-hours' }[key] || `#${key}`;
-    const input = $(selector);
-    if (input) input.value = value;
-  }
-  if (!Object.hasOwn(demo, 'language')) $('#language').value = '';
-  if (!Object.hasOwn(demo, 'durationHours')) $('#duration-hours').value = '';
-  if (!Object.hasOwn(demo, 'preferences')) $('#preferences').value = '';
-  await submitSearch();
-}));
-loadMeta().catch((error) => { statusLine.textContent = error.message; });
+$('#auth-notice .modal-close').addEventListener('click',()=>$('#auth-notice').hidden=true);$('#notice-login').addEventListener('click',()=>{$('#auth-notice').hidden=true;switchView('account');$('#login-form [name="username"]').focus();});
+async function boot(){try{await loadMeta();await refreshUser();if(user)loadAccount();}catch(e){message(e.message,true);}}
+boot();

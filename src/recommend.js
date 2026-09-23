@@ -34,6 +34,9 @@ function alternatives(catalog, req) {
   }
   return freeDates.sort((a,b)=>a.distance-b.distance || a.date.localeCompare(b.date)).slice(0,3).map(({date,count})=>({date,count}));
 }
+function isHardEligible(p, req) {
+  return p.city === req.city && p.categories.includes(req.category) && p.eventFormats.includes(req.eventFormat) && !p.busyDates.has(req.date) && p.priceFromKzt <= req.budgetKzt && (!req.language || p.languages.includes(req.language)) && (req.durationHours == null || p.maxHours == null || p.maxHours >= req.durationHours);
+}
 function createRecommender(catalog, embeddings = null, { aiTimeoutMs = 4800 } = {}) {
   const cities = uniqueSorted(catalog.map((p) => p.city));
   const meta = (city = cities[0]) => ({ cities, categories: uniqueSorted(catalog.flatMap((p) => p.categories)), categoriesInCity: uniqueSorted(catalog.filter((p) => p.city === city).flatMap((p) => p.categories)), eventFormats: uniqueSorted(catalog.flatMap((p) => p.eventFormats)), languages: uniqueSorted(catalog.flatMap((p) => p.languages)), calendarRange: CALENDAR_RANGE, profileCount: catalog.length });
@@ -84,6 +87,12 @@ function createRecommender(catalog, embeddings = null, { aiTimeoutMs = 4800 } = 
     const summary = pool.length < 3 ? `Обязательным условиям соответствуют ${pool.length} профилей; показаны все найденные.` : ai ? `${pool.length} профилей прошли обязательные условия. AI ранжировал только их и выбрал ${cards.length} ближайших к вашим пожеланиям.` : `Показаны ${cards.length} подходящих подрядчиков из ${pool.length}; порядок по цене предложения.`;
     return { status:200, body:{ outcome:'matched', matchedCount:pool.length, eligibleCount:pool.length, shownCount:cards.length, categoryCount:categoryPool.length, cards, rejectionCounts, funnel, aiStatus: ai ? 'active' : 'fallback', rankingMode: ai ? 'semantic' : 'price', aiFallbackReason: req.preferences && !ai ? aiFallbackReason : undefined, ranking: req.preferences ? (ai ? 'semantic' : 'fallback') : 'price', ai: ai ? 'available' : 'fallback', message: summary + aiNote, alternativeDates: alternatives(catalog,req) } };
   }
-  return { meta, recommend };
+  function checkProfile(input, profileId) {
+    const errors=validate(input,catalog); if(errors.length) return {valid:false,errors};
+    const req={city:input.city.trim(),date:input.date,eventFormat:input.eventFormat.trim(),category:input.category.trim(),budgetKzt:input.budgetKzt,language:input.language||'',durationHours:input.durationHours==null||input.durationHours===''?null:Number(input.durationHours)};
+    const profile=catalog.find((p)=>p.id===profileId);
+    return {valid:!!profile&&isHardEligible(profile,req)};
+  }
+  return { meta, recommend, checkProfile };
 }
-module.exports = { createRecommender, validate };
+module.exports = { createRecommender, validate, isHardEligible };
